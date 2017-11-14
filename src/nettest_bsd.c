@@ -1794,6 +1794,7 @@ Size (bytes)\n\
   SOCKET send_socket;
   int bytes_remaining;
   int tcp_mss = -1;  /* possibly uninitialized on printf far below */
+  int zerocopy;
 
   /* with links like fddi, one can send > 32 bits worth of bytes
      during a test... ;-) at some point, this should probably become a
@@ -2020,6 +2021,19 @@ Size (bytes)\n\
     demo_stream_setup(lss_size,rsr_size);
 #endif
 
+    zerocopy = !!getenv("NETPERF_ZEROCOPY");
+    if (zerocopy) {
+#ifndef SO_ZEROCOPY
+#define SO_ZEROCOPY 60
+#endif
+        int val = 1;
+
+        if (setsockopt(send_socket, SOL_SOCKET, SO_ZEROCOPY, &val, sizeof(val)))
+            error(1, errno, "setsockopt zerocopy");
+
+	fprintf(stderr, "with zerocopy\n");
+    }
+
     /*Connect up to the remote port on the data socket  */
     if (connect(send_socket,
 		remote_res->ai_addr,
@@ -2171,10 +2185,37 @@ Size (bytes)\n\
 	  goto next_buffer;
       } else
 #endif
+
+    if (zerocopy) {
+#ifndef MSG_ZEROCOPY
+#define MSG_ZEROCOPY 0x4000000
+#endif
+	const int max_batch = 16;
+    	static int batch;
+
+	if (++batch == max_batch) {
+		struct msghdr msg = {0};	/* flush */
+		int ret, num = 0;
+
+		do {
+			ret = recvmsg(send_socket, &msg, MSG_ERRQUEUE);
+			if (ret == -1 && errno == EAGAIN)
+				break;
+			if (ret == -1)
+				error(1, errno, "errqueue");
+			num++;
+		} while (msg.msg_flags & MSG_CTRUNC);
+
+		if (num > max_batch)
+			error(1, 0, "errqueue: read %d max %d", num, max_batch);
+
+		batch = 0;
+	}
+    }
 	len = send(send_socket,
 		   send_ring->buffer_ptr,
 		   send_size,
-		   0);
+		   zerocopy ? MSG_ZEROCOPY : 0);
 
       if(len != send_size) {
       if ((len >=0) || SOCKET_EINTR(len)) {
