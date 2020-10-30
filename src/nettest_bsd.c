@@ -40,6 +40,9 @@ char	nettest_id[]="\
 #include <config.h>
 #endif
 
+#include <sys/mman.h>
+#include <linux/types.h>
+
 #include <stdio.h>
 #if HAVE_SYS_TYPES_H
 # include <sys/types.h>
@@ -2029,7 +2032,7 @@ Size (bytes)\n\
         int val = 1;
 
         if (setsockopt(send_socket, SOL_SOCKET, SO_ZEROCOPY, &val, sizeof(val)))
-            error(1, errno, "setsockopt zerocopy");
+            perror("setsockopt zerocopy");
 
 	fprintf(stderr, "with zerocopy\n");
     }
@@ -2202,12 +2205,12 @@ Size (bytes)\n\
 			if (ret == -1 && errno == EAGAIN)
 				break;
 			if (ret == -1)
-				error(1, errno, "errqueue");
+				perror("errqueue");
 			num++;
 		} while (msg.msg_flags & MSG_CTRUNC);
 
 		if (num > max_batch)
-			error(1, 0, "errqueue: read %d max %d", num, max_batch);
+			fprintf(stderr, "errqueue: read %d max %d", num, max_batch);
 
 		batch = 0;
 	}
@@ -5069,6 +5072,14 @@ Size (bytes)\n\
 /* implemented as one routine. I could break things-out somewhat, but */
 /* didn't feel it was necessary. */
 
+struct tcp_zerocopy_rx {
+        __u64 address;          /* in: address of mapping */
+        __u32 length;           /* in/out: number of bytes to map/mapped */
+        __u32 recv_skip_hint;   /* out: amount of bytes to skip */
+        __u32 inq; /* out: amount of bytes in read queue */
+        __s32 err; /* out: socket error */
+};
+
 void
 recv_tcp_stream()
 {
@@ -5095,6 +5106,11 @@ recv_tcp_stream()
   struct	tcp_stream_request_struct	*tcp_stream_request;
   struct	tcp_stream_response_struct	*tcp_stream_response;
   struct	tcp_stream_results_struct	*tcp_stream_results;
+
+  int chunk_size = 128*1024;
+  char *buffer;
+  void *zc_addr, *real_zc_addr;
+  int zerocopy = !!getenv("NETPERF_ZEROCOPY");
 
 #ifdef DO_SELECT
   FD_ZERO(&readfds);
@@ -5212,6 +5228,16 @@ recv_tcp_stream()
     if (recv_width == 1) recv_width++;
   }
 
+  if (zerocopy) {
+    fprintf(stderr, "with zerocopy\n");
+
+    buffer = malloc(chunk_size);
+    if (!buffer) {
+      fprintf(stderr, "Failed to allocate buffer\n");
+      return;
+    }
+  } else {
+
   recv_ring = allocate_buffer_ring(recv_width,
 				   recv_size,
 				   tcp_stream_request->recv_alignment,
@@ -5221,7 +5247,7 @@ recv_tcp_stream()
     fprintf(where,"recv_tcp_stream: receive alignment and offset set...\n");
     fflush(where);
   }
-
+  }
   /* Now, let's set-up the socket to listen for connections */
   if (listen(s_listen, 5) == SOCKET_ERROR) {
     netperf_response.content.serv_errno = errno;
@@ -5288,6 +5314,17 @@ recv_tcp_stream()
     close(s_listen);
     exit(1);
   }
+  if (zerocopy) {
+    real_zc_addr = mmap(NULL, 2*chunk_size + 4096, PROT_READ, MAP_SHARED, s_data, 0);
+    if (real_zc_addr == (void *)-1) {
+	    fprintf(stderr, "mmap failed\n");
+	    return;
+    }
+#define ALIGN_UP(x, align_to)   (((x) + ((align_to)-1)) & ~((align_to)-1))
+#define ALIGN_PTR_UP(p, ptr_align_to)   ((typeof(p))ALIGN_UP((unsigned long)(p), ptr_align_to))
+
+    zc_addr = ALIGN_PTR_UP(real_zc_addr, 4096);
+  }
 
 #ifdef WIN32
   /* this is used so the timer thread can close the socket out from */
@@ -5330,8 +5367,10 @@ recv_tcp_stream()
   bytes_received = 0;
   receive_calls  = 0;
 
+  if (zerocopy) {
+  }
 #if HAVE_AIO
-  if (loc_rcvaio > 0) {
+  else if (loc_rcvaio > 0) {
     struct aiocb *iocb;
     unsigned int i;
 
@@ -5354,8 +5393,41 @@ recv_tcp_stream()
 #endif
 
   while (!times_up) {
+    if (zerocopy) {
+      struct tcp_zerocopy_rx zc = {
+	      .address = (__u64)((unsigned long)zc_addr),
+	      .length = chunk_size,
+      };
+      socklen_t zc_len = sizeof(zc);
+
+      if (getsockopt(s_data, IPPROTO_TCP, TCP_ZEROCOPY_RECEIVE,
+                     &zc, &zc_len) < 0) {
+	      if (errno == EIO)
+		      break;
+
+	fprintf(stderr, "zc: getsockopt(TCP_ZEROCOPY_RECEIVE) failed %s: %d\n",
+		strerror(errno), errno);
+        send_response();
+        exit(1);
+      }
+      if (debug)
+        fprintf(stderr, "zc: addr %llx len %u recv_skip %u inq %u err %d\n",
+                zc.address, zc.length, zc.recv_skip_hint, zc.inq, zc.err);
+      len = zc.length;
+
+      if (zc.recv_skip_hint) {
+        int lu;
+
+        lu = read(s_data, buffer, zc.recv_skip_hint);
+	if (lu > 0) {
+          if (debug)
+            fprintf(stderr, "read %d\n", lu);
+	  len += lu;
+	}
+      }
+    }
 #if HAVE_AIO
-    if (loc_rcvaio > 0) {
+    else if (loc_rcvaio > 0) {
       const struct aiocb *iocblist[1];
       struct aiocb *iocb;
       int error;
@@ -5377,12 +5449,12 @@ recv_tcp_stream()
           len = SOCKET_ERROR;
         }
       }
-    } else
+    }
 #endif
-    {
+    else {
       len = recv(s_data, recv_ring->buffer_ptr, recv_size, 0);
     }
-    if (len == 0)
+    if (!zerocopy && len == 0)
       break;
     if (len == SOCKET_ERROR ) {
       if (times_up) {
@@ -5396,13 +5468,16 @@ recv_tcp_stream()
     receive_calls++;
 
 #ifdef DIRTY
+    if (!zerocopy) {
     /* we access the buffer after the recv() call now, rather than before */
     access_buffer(recv_ring->buffer_ptr,
 		  recv_size,
 		  tcp_stream_request->dirty_count,
 		  tcp_stream_request->clean_count);
+    }
 #endif /* DIRTY */
 
+    if (!zerocopy) {
 #if HAVE_AIO
     if (loc_rcvaio > 0) {
       struct aiocb *iocb;
@@ -5422,6 +5497,7 @@ recv_tcp_stream()
 
     /* move to the next buffer in the recv_ring */
     recv_ring = recv_ring->next;
+    }
 
 #ifdef PAUSE
     sleep(1);
