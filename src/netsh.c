@@ -87,7 +87,7 @@ extern	int	getopt(int , char **, char *) ;
    getopt to parse the command line, we will tell getopt that they do
    not take parms, and then look for them ourselves */
 
-#define GLOBAL_CMD_LINE_ARGS "A:a:b:B:CcdD:f:F:H:hi:I:jk:K:l:L:n:NO:o:P:p:rSs:t:T:v:VW:w:y:Y:Z:46"
+#define GLOBAL_CMD_LINE_ARGS "A:a:b:B:CcdD:f:F:H:hi:I:jk:K:l:L:n:NO:o:P:p:rSs:t:T:v:VW:w:y:Y:zZ:46"
 
 /************************************************************************/
 /*									*/
@@ -140,6 +140,9 @@ float
 
 int
   shell_num_cpus=1;
+
+int
+  use_zerocopy=0;
 
 /* the end-test conditions for the tests - either transactions, bytes,
    or time. different vars used for clarity - space is cheap ;-) */
@@ -237,6 +240,7 @@ Options:\n\
     -6                Do IPv6\n\
     -v verbosity      Specify the verbosity level\n\
     -V                Display version information and exit\n\
+    -z                Use zerocopy APIs\n\
     -Z passphrase     Expect passphrase as the first thing received\n\
 \n";
 
@@ -285,6 +289,7 @@ Global options:\n\
     -V                Display the netperf version and exit\n\
     -y local,remote   Set the socket priority\n\
     -Y local,remote   Set the IP_TOS. Use hexadecimal.\n\
+    -z                Use zerocopy APIs\n\
     -Z passphrase     Set and pass to netserver a passphrase\n";
 
 char netperf_usage2[] = "\n\
@@ -903,6 +908,9 @@ scan_cmd_line(int argc, char *argv[])
 	  fflush(where);
 	}
       }
+      break;
+    case 'z':
+      use_zerocopy = 1;
       break;
     case 'Z':
       /* only copy as much of the passphrase as could fit in the

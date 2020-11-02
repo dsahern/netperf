@@ -185,6 +185,9 @@ extern float
 extern int
   shell_num_cpus;
 
+extern int
+  use_zerocopy;
+
 extern	char
   test_name[BUFSIZ];
 

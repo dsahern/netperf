@@ -1797,7 +1797,6 @@ Size (bytes)\n\
   SOCKET send_socket;
   int bytes_remaining;
   int tcp_mss = -1;  /* possibly uninitialized on printf far below */
-  int zerocopy;
 
   /* with links like fddi, one can send > 32 bits worth of bytes
      during a test... ;-) at some point, this should probably become a
@@ -2024,8 +2023,7 @@ Size (bytes)\n\
     demo_stream_setup(lss_size,rsr_size);
 #endif
 
-    zerocopy = !!getenv("NETPERF_ZEROCOPY");
-    if (zerocopy) {
+    if (use_zerocopy) {
 #ifndef SO_ZEROCOPY
 #define SO_ZEROCOPY 60
 #endif
@@ -2189,7 +2187,7 @@ Size (bytes)\n\
       } else
 #endif
 
-    if (zerocopy) {
+    if (use_zerocopy) {
 #ifndef MSG_ZEROCOPY
 #define MSG_ZEROCOPY 0x4000000
 #endif
@@ -2218,7 +2216,7 @@ Size (bytes)\n\
 	len = send(send_socket,
 		   send_ring->buffer_ptr,
 		   send_size,
-		   zerocopy ? MSG_ZEROCOPY : 0);
+		   use_zerocopy ? MSG_ZEROCOPY : 0);
 
       if(len != send_size) {
       if ((len >=0) || SOCKET_EINTR(len)) {
@@ -5110,7 +5108,6 @@ recv_tcp_stream()
   int chunk_size = 128*1024;
   char *buffer;
   void *zc_addr, *real_zc_addr;
-  int zerocopy = !!getenv("NETPERF_ZEROCOPY");
 
 #ifdef DO_SELECT
   FD_ZERO(&readfds);
@@ -5228,7 +5225,7 @@ recv_tcp_stream()
     if (recv_width == 1) recv_width++;
   }
 
-  if (zerocopy) {
+  if (use_zerocopy) {
     fprintf(stderr, "with zerocopy\n");
 
     buffer = malloc(chunk_size);
@@ -5314,7 +5311,7 @@ recv_tcp_stream()
     close(s_listen);
     exit(1);
   }
-  if (zerocopy) {
+  if (use_zerocopy) {
     real_zc_addr = mmap(NULL, 2*chunk_size + 4096, PROT_READ, MAP_SHARED, s_data, 0);
     if (real_zc_addr == (void *)-1) {
 	    fprintf(stderr, "mmap failed\n");
@@ -5367,7 +5364,7 @@ recv_tcp_stream()
   bytes_received = 0;
   receive_calls  = 0;
 
-  if (zerocopy) {
+  if (use_zerocopy) {
   }
 #if HAVE_AIO
   else if (loc_rcvaio > 0) {
@@ -5393,7 +5390,7 @@ recv_tcp_stream()
 #endif
 
   while (!times_up) {
-    if (zerocopy) {
+    if (use_zerocopy) {
       struct tcp_zerocopy_rx zc = {
 	      .address = (__u64)((unsigned long)zc_addr),
 	      .length = chunk_size,
@@ -5454,7 +5451,7 @@ recv_tcp_stream()
     else {
       len = recv(s_data, recv_ring->buffer_ptr, recv_size, 0);
     }
-    if (!zerocopy && len == 0)
+    if (!use_zerocopy && len == 0)
       break;
     if (len == SOCKET_ERROR ) {
       if (times_up) {
@@ -5468,7 +5465,7 @@ recv_tcp_stream()
     receive_calls++;
 
 #ifdef DIRTY
-    if (!zerocopy) {
+    if (!use_zerocopy) {
     /* we access the buffer after the recv() call now, rather than before */
     access_buffer(recv_ring->buffer_ptr,
 		  recv_size,
@@ -5477,7 +5474,7 @@ recv_tcp_stream()
     }
 #endif /* DIRTY */
 
-    if (!zerocopy) {
+    if (!use_zerocopy) {
 #if HAVE_AIO
     if (loc_rcvaio > 0) {
       struct aiocb *iocb;
