@@ -1917,8 +1917,9 @@ Size (bytes)\n\
     /* send_size is bigger than the socket size, so we must check... the */
     /* user may have wanted to explicitly set the "width" of our send */
     /* buffers, we should respect that wish... */
+#define SEND_WIDTH_URING  16
     if (use_uring) {
-      send_width = 16;
+      send_width = SEND_WIDTH_URING;
     } else if (send_width == 0) {
       send_width = (lss_size/send_size) + 1;
       if (send_width == 1) send_width++;
@@ -2046,6 +2047,9 @@ Size (bytes)\n\
     }
 
     if (use_uring) {
+      struct iovec iov_uring[SEND_WIDTH_URING];
+      int i;
+
       uring_entries = send_width;
       uring_avail = uring_entries;
       if (io_uring_queue_init(uring_entries, &ring, 0)) {
@@ -2054,6 +2058,19 @@ Size (bytes)\n\
       }
       if (debug)
         fprintf(stderr, "with uring; uring_entries %u", uring_entries);
+
+      for (i = 0; i < uring_entries; ++i) {
+        iov_uring[i].iov_base = send_ring;
+        iov_uring[i].iov_len = send_size;
+        send_ring = send_ring->next;
+      }
+      if (io_uring_register_buffers(&ring, iov_uring, uring_entries) != 0) {
+        fprintf(stderr, "buffer registration failed: %s:%d \n",
+                strerror(errno), errno);
+        exit(1);
+      }
+      if (debug)
+        fprintf(stderr, "registered buffers\n");
     }
 
     /*Connect up to the remote port on the data socket  */
@@ -2239,18 +2256,24 @@ Size (bytes)\n\
       if (uring_avail == 0) {
           int rc;
 try_submit:
-          rc = io_uring_submit(&ring);
-          if (debug)
-            fprintf(stderr, "io_uring_submit returned %d\n", rc);
+          while(1) {
+            rc = io_uring_submit(&ring);
+            if (rc < 0) {
+              if (errno == EINTR)
+                continue;
+              if (errno == EBUSY)
+                goto do_wait;
 
-          if (rc < 0) {
-            fprintf(stderr, "io_uring_submit failed\n");
-            exit(1);
+              fprintf(stderr, "io_uring_submit failed: %s: %d\n",
+                      strerror(errno), errno);
+              exit(1);
+            }
+            break;
           }
 
           if (debug)
             fprintf(stderr, "io_uring_wait_cqe ...\n");
-
+do_wait:
           while(1) {
             if (io_uring_wait_cqe(&ring, &cqe) < 0) {
               if (errno == EINTR)
@@ -2401,7 +2424,7 @@ try_submit:
     }
 
     if (shutdown(send_socket,SHUT_WR) == SOCKET_ERROR && !times_up) {
-      perror("netperf: cannot shutdown tcp stream socket");
+      fprintf(stderr, "netperf: cannot shutdown tcp stream socket");
       exit(1);
     }
 
