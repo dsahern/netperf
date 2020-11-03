@@ -87,7 +87,7 @@ extern	int	getopt(int , char **, char *) ;
    getopt to parse the command line, we will tell getopt that they do
    not take parms, and then look for them ourselves */
 
-#define GLOBAL_CMD_LINE_ARGS "A:a:b:B:CcdD:f:F:H:hi:I:jk:K:l:L:n:NO:o:P:p:rSs:t:T:v:VW:w:y:Y:zZ:46"
+#define GLOBAL_CMD_LINE_ARGS "A:a:b:B:CcdD:f:F:H:hi:I:jk:K:l:L:n:NO:o:P:p:rSs:t:T:uv:VW:w:y:Y:zZ:46"
 
 /************************************************************************/
 /*									*/
@@ -142,7 +142,8 @@ int
   shell_num_cpus=1;
 
 int
-  use_zerocopy=0;
+  use_zerocopy=0,
+  use_uring = 0;
 
 /* the end-test conditions for the tests - either transactions, bytes,
    or time. different vars used for clarity - space is cheap ;-) */
@@ -860,6 +861,9 @@ scan_cmd_line(int argc, char *argv[])
 	remote_proc_affinity = convert(arg2);
       }
       cpu_binding_requested = 1;
+      break;
+    case 'u':
+      use_uring = 1;
       break;
     case 'W':
       /* set the "width" of the user space data buffer ring. This will

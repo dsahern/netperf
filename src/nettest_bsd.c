@@ -160,6 +160,7 @@ char	nettest_id[]="\
 #include "hist.h"
 #endif /* WANT_HISTOGRAM */
 
+#include "liburing.h"
 
 /* make first_burst_size unconditional so we can use it easily enough
    when calculating transaction latency for the TCP_RR test. raj
@@ -1820,6 +1821,13 @@ Size (bytes)\n\
   struct addrinfo *remote_res;
   struct addrinfo *local_res;
 
+  struct io_uring ring;
+  struct io_uring_cqe *cqe;
+  struct io_uring_sqe *sqe;
+  unsigned uring_entries;
+  unsigned uring_avail;
+  unsigned uring_idx;
+
   struct	tcp_stream_request_struct	*tcp_stream_request;
   struct	tcp_stream_response_struct	*tcp_stream_response;
   struct	tcp_stream_results_struct	*tcp_stream_result;
@@ -1909,7 +1917,9 @@ Size (bytes)\n\
     /* send_size is bigger than the socket size, so we must check... the */
     /* user may have wanted to explicitly set the "width" of our send */
     /* buffers, we should respect that wish... */
-    if (send_width == 0) {
+    if (use_uring) {
+      send_width = 16;
+    } else if (send_width == 0) {
       send_width = (lss_size/send_size) + 1;
       if (send_width == 1) send_width++;
     }
@@ -2033,6 +2043,17 @@ Size (bytes)\n\
             perror("setsockopt zerocopy");
 
 	fprintf(stderr, "with zerocopy\n");
+    }
+
+    if (use_uring) {
+      uring_entries = send_width;
+      uring_avail = uring_entries;
+      if (io_uring_queue_init(uring_entries, &ring, 0)) {
+        fprintf(stderr, "queue init failed\n");
+        exit(1);
+      }
+      if (debug)
+        fprintf(stderr, "with uring; uring_entries %u", uring_entries);
     }
 
     /*Connect up to the remote port on the data socket  */
@@ -2213,21 +2234,86 @@ Size (bytes)\n\
 		batch = 0;
 	}
     }
-	len = send(send_socket,
+
+    if (use_uring) {
+      if (uring_avail == 0) {
+          int rc;
+try_submit:
+          rc = io_uring_submit(&ring);
+          if (debug)
+            fprintf(stderr, "io_uring_submit returned %d\n", rc);
+
+          if (rc < 0) {
+            fprintf(stderr, "io_uring_submit failed\n");
+            exit(1);
+          }
+
+          if (debug)
+            fprintf(stderr, "io_uring_wait_cqe ...\n");
+
+          while(1) {
+            if (io_uring_wait_cqe(&ring, &cqe) < 0) {
+              if (errno == EINTR)
+		     continue; 
+              fprintf(stderr, "io_uring_wait_cqe failed: %s:%d\n",
+                      strerror(errno), errno);
+              exit(1);
+            }
+	    break;
+	  }
+
+          while(cqe) {
+            uring_avail++;
+            if (debug)
+              fprintf(stderr, "cqe %p res %d user_data %llu: uring_avail %u\n",
+                      cqe, cqe->res, cqe->user_data, uring_avail);
+
+            if (cqe->res != send_size) {
+              fprintf(stderr, "failed cqe: res %d vs send_size %u\n",
+                      cqe->res, send_size);
+	    }
+
+	    if (io_uring_peek_cqe(&ring, &cqe) < 0)
+              break;
+            io_uring_cqe_seen(&ring, cqe);
+          }
+      }
+
+      sqe = io_uring_get_sqe(&ring);
+      if (!sqe) {
+        //fprintf(stderr, "No sqe available when one expected\n");
+        uring_avail = 0;
+        goto try_submit;
+      }
+      uring_avail--;
+
+      if (debug)
+        fprintf(stderr, "sqe init; buffer %p size %d uring_avail %u\n",
+                send_ring->buffer_ptr, send_size, uring_avail);
+      io_uring_prep_send(sqe, send_socket, send_ring->buffer_ptr, send_size, 0);
+
+      /* user_data is the ring index */
+      sqe->user_data = uring_idx;
+      uring_idx++;
+      if (uring_idx >= uring_entries)
+          uring_idx = 0;
+
+    } else {
+       len = send(send_socket,
 		   send_ring->buffer_ptr,
 		   send_size,
 		   use_zerocopy ? MSG_ZEROCOPY : 0);
 
       if(len != send_size) {
-      if ((len >=0) || SOCKET_EINTR(len)) {
-	    /* the test was interrupted, must be the end of test */
-	    break;
-	  }
-	perror("netperf: data send error");
-	printf("len was %d\n",len);
-	exit(1);
+          if ((len >=0) || SOCKET_EINTR(len)) {
+	        /* the test was interrupted, must be the end of test */
+	        break;
+	      }
+	      perror("netperf: data send error");
+              printf("len was %d\n",len);
+	      exit(1);
       }
-
+    }
       local_bytes_sent += send_size;
 
 #if HAVE_AIO

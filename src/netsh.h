@@ -186,7 +186,8 @@ extern int
   shell_num_cpus;
 
 extern int
-  use_zerocopy;
+  use_zerocopy,
+  use_uring;
 
 extern	char
   test_name[BUFSIZ];

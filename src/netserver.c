@@ -1270,7 +1270,7 @@ accept_connections() {
 }
 
 #ifndef WIN32
-#define SERVER_ARGS "DdfhL:n:Np:v:VzZ:46"
+#define SERVER_ARGS "DdfhL:n:Np:uv:VzZ:46"
 #else
 #define SERVER_ARGS "DdfhL:n:Np:v:VZ:46I:i:"
 #endif
@@ -1342,6 +1342,9 @@ scan_netserver_args(int argc, char *argv[]) {
       /* we want to open a listen socket at a specified port number */
       strncpy(listen_port,optarg,sizeof(listen_port));
       not_inetd = 1;
+      break;
+    case 'u':
+      use_uring = 1;
       break;
     case 'z':
       use_zerocopy = 1;
